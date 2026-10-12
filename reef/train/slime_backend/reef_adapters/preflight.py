@@ -187,20 +187,42 @@ def rollout_paths(storage: CheckpointStorage, rollout_id: int) -> list[str]:
     ]
 
 
+def load_resolves_to_save(storage: CheckpointStorage) -> bool:
+    """Whether ``--load`` is the same Megatron root as ``--save``.
+
+    Bundled configurations keep both on one directory so a restart loads the
+    tracker the job just left. A missing ``--load``, or one that points at
+    another checkpoint, can publish different weights under the restored
+    ``runtime_load_id``, so automatic recovery must refuse those starts.
+    """
+    source = storage.source_megatron
+    if source is None:
+        return False
+    try:
+        return source.expanduser().resolve() == storage.megatron_root.expanduser().resolve()
+    except OSError:
+        return False
+
+
 def committed_marker_to_restore(
     storage: CheckpointStorage, marker: Mapping[str, Any], megatron_lora_rank: int
 ) -> dict[str, Any] | None:
     """The settled marker a ``RUNNING`` job replaced, when restoring it is safe.
 
-    This is the documented full-weight state: the tracker names an earlier
-    rollout ``P``, the job left nothing for its own rollout, and the newest
-    checkpoint record is ``P``'s. The marker the job replaced must be kept in
-    the ``RUNNING`` marker, settle ``P``'s job, and carry Reef's commit
-    acknowledgement, which a rejected job never gets. Any other state stays
-    ambiguous.
+    This is the documented full-weight state: ``--load`` resolves to ``--save``,
+    the tracker names an earlier rollout ``P``, the job left nothing for its
+    own rollout, and the newest checkpoint record is ``P``'s. The marker the
+    job replaced must be kept in the ``RUNNING`` marker, settle ``P``'s job,
+    and carry Reef's commit acknowledgement, which a rejected job never gets.
+    Any other state stays ambiguous.
     """
     committed = marker.get(COMMITTED_MARKER_KEY)
-    if megatron_lora_rank > 0 or not isinstance(committed, Mapping) or not marker_committed(committed):
+    if (
+        megatron_lora_rank > 0
+        or not isinstance(committed, Mapping)
+        or not marker_committed(committed)
+        or not load_resolves_to_save(storage)
+    ):
         return None
     _, tracker_iteration, _ = tracker_iteration_state(storage)
     previous_rollout = committed.get("rollout_id")

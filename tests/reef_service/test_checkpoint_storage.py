@@ -460,13 +460,20 @@ DOCUMENTED_RECOVERY = (
 NO_DOCUMENTED_RECOVERY = f"{TROUBLESHOOTING_ENTRY} gives no manual recovery for this state"
 
 
-def checkpoint_args(storage: CheckpointStorage, megatron_lora_rank: int = 0) -> SlimeArguments:
+_LOAD_SAME_AS_SAVE = object()
+
+
+def checkpoint_args(
+    storage: CheckpointStorage, megatron_lora_rank: int = 0, *, load: str | None | object = _LOAD_SAME_AS_SAVE
+) -> SlimeArguments:
+    # Happy-path recovery needs ``--load`` on the same root as ``--save``.
+    resolved_load = str(storage.megatron_root) if load is _LOAD_SAME_AS_SAVE else load
     return SlimeArguments(
         save_hf=storage.hf_template,
         save=str(storage.megatron_root),
         use_critic=False,
         hf_checkpoint=None,
-        load=None,
+        load=resolved_load,
         megatron_lora_rank=megatron_lora_rank,
         critic_save_interval=1,
     )
@@ -614,6 +621,8 @@ def test_preflight_restores_the_committed_marker_when_the_killed_job_saved_nothi
         "parent-load-differs",
         "record-names-another-job",
         "newer-record",
+        "load-unset",
+        "load-other-checkpoint",
     ],
 )
 def test_preflight_keeps_refusing_states_it_cannot_prove_safe(tmp_path: Path, case: str) -> None:
@@ -622,6 +631,7 @@ def test_preflight_keeps_refusing_states_it_cannot_prove_safe(tmp_path: Path, ca
     committed = committed_marker(storage)
     running_overrides: dict = {}
     megatron_lora_rank = 0
+    load: str | None | object = _LOAD_SAME_AS_SAVE
     tracker_path = storage.megatron_root / "latest_checkpointed_iteration.txt"
     if case == "no-committed-marker":
         committed = None
@@ -643,9 +653,16 @@ def test_preflight_keeps_refusing_states_it_cannot_prove_safe(tmp_path: Path, ca
         storage.records_root.joinpath(f"{5:020d}.json").write_text(
             storage._record_path(0).read_text(encoding="utf-8"), encoding="utf-8"
         )
+    elif case == "load-unset":
+        load = None
+    elif case == "load-other-checkpoint":
+        other = tmp_path / "other-megatron"
+        other.mkdir()
+        (other / "latest_checkpointed_iteration.txt").write_text("0", encoding="utf-8")
+        load = str(other)
     running = write_running(storage, committed, **running_overrides)
 
     with pytest.raises(RuntimeError, match=f"ambiguous training job {INTERRUPTED_JOB_ID}"):
-        prepare_checkpoint_storage(checkpoint_args(storage, megatron_lora_rank), RetentionConfig())
+        prepare_checkpoint_storage(checkpoint_args(storage, megatron_lora_rank, load=load), RetentionConfig())
 
     assert durable_io.read_marker(storage.marker_path) == running
